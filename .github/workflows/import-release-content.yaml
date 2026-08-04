@@ -92,7 +92,7 @@ jobs:
 
           CURRENT_VERSION=""
           if [ -f "${DESTINATION}${CONTENT_NAME}" ]; then
-            CURRENT_VERSION="$(cat "${DESTINATION}${CONTENT_NAME}" | tr -d '[:space:]')"
+            CURRENT_VERSION="$(tr -d '[:space:]' < "${DESTINATION}${CONTENT_NAME}")"
           fi
           echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
           echo "Current version: $CURRENT_VERSION"
