@@ -1,0 +1,90 @@
+name: Terragrunt Validation
+
+# Reusable pre-commit validation for terragrunt-flavored repos
+# (infrastructure-live-staging / -customer / modules mirrors): the repo's own
+# pre-commit hooks with terraform + terragrunt tooling provisioned.
+# Secret-free; safe on fork-triggered runs.
+#
+# changed_files_only=true validates only the push/PR diff — for mirror repos
+# where machine-imported content is validated upstream and must not fail
+# checks on unrelated human changes. Callers add their own skip conditions
+# (e.g. skipping bot sync commits) at the calling job's `if:`.
+
+on:
+  workflow_call:
+    inputs:
+      terraform_version_file:
+        description: Path to the file pinning the Terraform version.
+        required: false
+        type: string
+        default: .terraform-version
+      terragrunt_version:
+        description: Terragrunt version to install.
+        required: false
+        type: string
+        default: 0.44.0
+      python_version:
+        description: Python version used to run pre-commit.
+        required: false
+        type: string
+        default: '3.12'
+      changed_files_only:
+        description: Run hooks only against the files changed by this push/PR.
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  pre-commit:
+    name: Pre-Commit Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read Terraform version
+        id: tf-version
+        run: echo "version=$(cat "${{ inputs.terraform_version_file }}")" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ steps.tf-version.outputs.version }}
+          terraform_wrapper: false
+
+      - name: Setup Terragrunt
+        uses: autero1/action-terragrunt@706ac4008b7f9a456b585b8c61ad41f4f8d22f41
+        with:
+          terragrunt_version: ${{ inputs.terragrunt_version }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Run pre-commit
+        env:
+          CHANGED_ONLY: ${{ inputs.changed_files_only }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          pip install --quiet pre-commit
+          if [ "$CHANGED_ONLY" != "true" ]; then
+            pre-commit run --all-files
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch origin "$BASE_REF" --quiet
+            FROM="origin/$BASE_REF"
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+            FROM="$BEFORE_SHA"
+          else
+            git fetch origin "$DEFAULT_BRANCH" --quiet
+            FROM="origin/$DEFAULT_BRANCH"
+          fi
+          echo "Validating changes since $FROM"
+          pre-commit run --from-ref "$FROM" --to-ref HEAD

@@ -15,8 +15,16 @@ Terraform-module workflows here are the candidate contribution to
 | Workflow | Purpose |
 |---|---|
 | `terraform-module-validation.yaml` | The repo's own pre-commit hooks (terraform pinned from `.terraform-version`, tflint, checksum-verified tfsec) + Checkov. No secrets — safe on fork-triggered runs. |
+| `terragrunt-validation.yaml` | Pre-commit for terragrunt-flavored repos (live/staging/mirror repos): terraform + terragrunt tooling; optional `changed_files_only` mode for mirrors. No secrets. |
 | `semantic-release.yaml` | semantic-release on the consumer's local release stack; interface mirrors `armor/actions` (same `GIT_TOKEN_BASIC` secret, same `semver` output — empty when no release was created). |
 | `update-source-reference.yaml` | After a package release, rewrite the package's `?ref=` pins in the target repository (default `infrastructure-modules`). Minor/patch → direct GPG-signed push; major → feature branch + PR. |
+| `import-release-content.yaml` | Import a library release asset: download, strict-validate everything it adds/changes (bad content fails *before* the commit), version pointer, changelog, commit + push. Caller owns the dispatch triggers and concurrency group. |
+| `copy-source-to-repo.yaml` | Sync the paths in a path-list file into a mirror repository: rsync, GPG-signed bot commit, version tag, push. |
+| `strict-yaml-validation.yaml` | Full-state strict YAML scan of a directory (duplicate keys rejected) — the release exit-door check. No secrets. |
+
+Deliberately **not** centralized: single-consumer automation (e.g.
+infrastructure-live-customer's template-update job) stays in its repo —
+centralizing a one-off adds indirection without reuse.
 
 ## Consumption
 

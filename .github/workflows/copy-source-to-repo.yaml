@@ -1,0 +1,119 @@
+name: Copy Source To Repo
+
+# Reusable sync-to-mirror job (port of pipeline-library's
+# copy-source-to-repo.yml / infrastructure-modules' sync-customer-modules):
+# rsync the paths listed in a path-list file into a target repository,
+# commit as the CI bot (GPG-signed), tag with the given version, and push.
+# Content synced by this workflow should be validated in the SOURCE repo
+# before release — the mirror receives it as-is.
+
+on:
+  workflow_call:
+    inputs:
+      target_repository:
+        description: Repository the paths are synced into.
+        required: true
+        type: string
+      source_org:
+        description: GitHub organization hosting the target repository.
+        required: false
+        type: string
+        default: quantum-sec
+      path_list_file:
+        description: File listing the paths to sync (one per line).
+        required: false
+        type: string
+        default: .customer-modules
+      version:
+        description: Version used in the commit message and tag.
+        required: true
+        type: string
+      commit_message:
+        description: Commit message; defaults to the import-updates convention.
+        required: false
+        type: string
+        default: ''
+      gpg_key_id:
+        description: Fingerprint of the CI bot signing key.
+        required: false
+        type: string
+        default: 5DEFE5F42550F28A17F9B83AC7E6D88B99BC6D9D
+      gpg_key_subject:
+        description: Committer email matching the signing key.
+        required: false
+        type: string
+        default: ci@quantum.security
+    secrets:
+      IMPORT_GPG_KEY:
+        required: true
+      IMPORT_GPG_KEY_PASSPHRASE:
+        required: true
+      QUANTUM_CI_BOT_GITHUB_SSH_KEY:
+        required: true
+
+jobs:
+  copy-source:
+    name: Sync to ${{ inputs.target_repository }}
+    runs-on: ubuntu-latest
+    env:
+      TARGET_REPOSITORY: ${{ inputs.target_repository }}
+      SOURCE_ORG: ${{ inputs.source_org }}
+      PATH_LIST_FILE: ${{ inputs.path_list_file }}
+      SYNC_VERSION: ${{ inputs.version }}
+      GPG_KEY_SUBJECT: ${{ inputs.gpg_key_subject }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate version
+        run: |
+          if ! [[ "$SYNC_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$SYNC_VERSION' is not strict semver — refusing to proceed."
+            exit 1
+          fi
+
+      - name: Import GPG key
+        env:
+          GPG_KEY_BASE64: ${{ secrets.IMPORT_GPG_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.IMPORT_GPG_KEY_PASSPHRASE }}
+          GPG_KEY_ID: ${{ inputs.gpg_key_id }}
+        run: |
+          echo "$GPG_KEY_BASE64" | base64 -d | gpg --batch --yes --no-tty --always-trust --import
+          echo "ENCRYPTION_TEST" | gpg --always-trust --encrypt --recipient "$GPG_KEY_SUBJECT" > temp.encrypted
+          gpg --batch --yes --no-tty --decrypt --passphrase "$GPG_PASSPHRASE" --pinentry-mode loopback --always-trust temp.encrypted
+          rm -f temp.encrypted
+          git config --global user.signingkey "$GPG_KEY_ID"
+          git config --global commit.gpgsign true
+
+      - name: Setup SSH key
+        env:
+          SSH_KEY: ${{ secrets.QUANTUM_CI_BOT_GITHUB_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Clone target repository
+        run: git clone "git@github.com:${SOURCE_ORG}/${TARGET_REPOSITORY}.git"
+
+      - name: Sync paths
+        run: |
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            rsync -vr -R --delete "$path" "$TARGET_REPOSITORY"
+          done < "$PATH_LIST_FILE"
+
+      - name: Commit, tag and push
+        env:
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+        run: |
+          cd "$TARGET_REPOSITORY"
+          git config user.email "$GPG_KEY_SUBJECT"
+          git config user.name "Quantum CI Bot"
+          MESSAGE="${COMMIT_MESSAGE:-Import updates from ${GITHUB_REPOSITORY#*/}@${SYNC_VERSION} (patch)}"
+          git add -A
+          git commit --allow-empty -m "$MESSAGE"
+          git tag "$SYNC_VERSION"
+          git push
+          git push --tags

@@ -1,0 +1,269 @@
+name: Import Release Content
+
+# Reusable content import: download a library release asset, strict-validate
+# every YAML file it adds or changes, and commit it with a version pointer
+# and changelog. The caller owns the triggers (repository_dispatch /
+# workflow_dispatch), concurrency group, and passes the requested version
+# through (empty = latest release).
+#
+# Validation gate: bad content fails the import BEFORE the commit — the
+# repository never receives it, and the failure lands where it is
+# actionable. Diff-scoped so pre-existing content is grandfathered and one
+# bad upstream release cannot block unrelated imports.
+
+on:
+  workflow_call:
+    inputs:
+      source_repository:
+        description: Repository whose release asset is imported (org/name).
+        required: true
+        type: string
+      content_name:
+        description: Name used for the version pointer file and changelog (e.g. siem-rule-library).
+        required: true
+        type: string
+      destination:
+        description: Directory the asset is extracted into.
+        required: false
+        type: string
+        default: azure/content/
+      artifact_pattern:
+        description: Release asset filename pattern.
+        required: false
+        type: string
+        default: content.tar.gz
+      version:
+        description: Release version to import; empty resolves to the latest release.
+        required: false
+        type: string
+        default: ''
+      default_branch:
+        description: Branch the import is committed to.
+        required: false
+        type: string
+        default: master
+    secrets:
+      GIT_TOKEN_BASIC:
+        required: true
+
+jobs:
+  import:
+    name: Import ${{ inputs.content_name }}
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+      CONTENT_NAME: ${{ inputs.content_name }}
+      DESTINATION: ${{ inputs.destination }}
+      ARTIFACT_PATTERN: ${{ inputs.artifact_pattern }}
+      DEFAULT_BRANCH: ${{ inputs.default_branch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GIT_TOKEN_BASIC }}
+          fetch-depth: 0
+
+      - name: Determine release version
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TOKEN_BASIC }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="$(gh release list --repo "$SOURCE_REPOSITORY" --json tagName,isLatest --limit 1 -q '.[] | select(.isLatest) | .tagName')"
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine release version"
+            exit 1
+          fi
+
+          # Version arrives from a dispatch payload or manual input and is
+          # later interpolated into a sed program — require strict semver.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release version '$VERSION' is not strict semver — refusing to proceed."
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release version: $VERSION"
+
+          CURRENT_VERSION=""
+          if [ -f "${DESTINATION}${CONTENT_NAME}" ]; then
+            CURRENT_VERSION="$(cat "${DESTINATION}${CONTENT_NAME}" | tr -d '[:space:]')"
+          fi
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Current version: $CURRENT_VERSION"
+
+          if [ "$VERSION" = "$CURRENT_VERSION" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Already at version $VERSION, skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download release asset
+        if: steps.release.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TOKEN_BASIC }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          gh release download "$RELEASE_VERSION" \
+            --repo "$SOURCE_REPOSITORY" \
+            --pattern "$ARTIFACT_PATTERN" \
+            --dir "/tmp/${CONTENT_NAME}-release"
+
+      - name: Clean and extract content
+        if: steps.release.outputs.skip != 'true'
+        run: |
+          # Clean untracked files in destination (matches AzDO git clean -ffd behavior)
+          git clean -ffd -- "$DESTINATION"
+
+          # Extract into the destination (overwriting existing files)
+          tar xzf "/tmp/${CONTENT_NAME}-release/${ARTIFACT_PATTERN}" -C "$DESTINATION"
+
+      - name: Validate imported content
+        if: steps.release.outputs.skip != 'true'
+        run: |
+          {
+            git diff --name-only -- "$DESTINATION"
+            git ls-files --others --exclude-standard -- "$DESTINATION"
+          } | grep -E '\.ya?ml$' | sort -u > /tmp/changed-yaml.txt || true
+          if [ ! -s /tmp/changed-yaml.txt ]; then
+            echo "No YAML changes to validate."
+            exit 0
+          fi
+          pip install --quiet ruamel.yaml
+          python3 - <<'PYEOF'
+          from ruamel.yaml import YAML
+          import sys
+          yaml = YAML(typ="safe")
+          failed = []
+          for line in open("/tmp/changed-yaml.txt"):
+              path = line.strip()
+              if not path:
+                  continue
+              try:
+                  with open(path) as f:
+                      list(yaml.load_all(f))
+              except Exception as e:
+                  failed.append((path, str(e).splitlines()[0]))
+          for path, err in failed:
+              print(f"::error file={path}::{err}")
+          if failed:
+              print(f"{len(failed)} imported YAML file(s) failed strict validation.")
+              print("Fix the generator in the source library and cut a new release; this import will not be committed.")
+              sys.exit(1)
+          print("All added/changed YAML files parse cleanly.")
+          PYEOF
+
+      - name: Update version pointer
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          echo "$RELEASE_VERSION" > "${DESTINATION}${CONTENT_NAME}"
+
+      - name: Generate changelog
+        if: steps.release.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TOKEN_BASIC }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          CURRENT_VERSION: ${{ steps.release.outputs.current_version }}
+        run: |
+          RELEASE="$RELEASE_VERSION"
+          PREVIOUS_RELEASE="$CURRENT_VERSION"
+          CHANGELOG_FILE="${DESTINATION}CHANGELOG.${CONTENT_NAME}.md"
+          REPO="$SOURCE_REPOSITORY"
+
+          # Build list of releases between previous and current (inclusive of current, exclusive of previous)
+          if [ -n "$PREVIOUS_RELEASE" ]; then
+            # Use sed to extract release tags between RELEASE and PREVIOUS_RELEASE
+            read -r SEDSCRIPT <<_EOF_
+          /^${RELEASE}$/,/^${PREVIOUS_RELEASE}$/{/^${PREVIOUS_RELEASE}$/!p;}
+          _EOF_
+            mapfile -t RELEASES < <(gh release list -L 250 --repo "$REPO" --json tagName -q '.[].tagName' | sed -n "$SEDSCRIPT")
+          else
+            RELEASES=("$RELEASE")
+          fi
+
+          if [ "${#RELEASES[@]}" -eq 0 ]; then
+            echo "::warning::No releases found between $PREVIOUS_RELEASE and $RELEASE"
+            RELEASES=("$RELEASE")
+          fi
+
+          RELEASE_NOTES=""
+
+          for thisrelease in "${RELEASES[@]}"; do
+            echo "Processing release: $thisrelease"
+
+            # Fetch release metadata as JSON
+            RELEASE_JSON="$(PAGER="cat" gh release view \
+              --repo "$REPO" \
+              --json 'name,tagName,isDraft,isPrerelease,author,createdAt,publishedAt,url,assets,body' \
+              "$thisrelease" | \
+              jq -r '{
+                name: .name,
+                tag: .tagName,
+                draft: .isDraft | tostring,
+                prerelease: .isPrerelease | tostring,
+                author: .author.login,
+                created: .createdAt,
+                published: .publishedAt,
+                url: .url,
+                assets: [.assets[] | .name],
+                body: .body
+              }'
+            )"
+
+            # Build release notes entry: header + indented JSON metadata + body with commit links
+            RELEASE_NOTES+="$(
+              {
+                echo
+                echo
+                # Header
+                jq -r --argjson notes "$RELEASE_JSON" -n '$notes | "# " + (.name) + "\n"'
+                # Indented JSON metadata (without body)
+                jq -r --argjson notes "$RELEASE_JSON" -n '$notes | del(.body)' | \
+                  sed 's/^/    /'
+                # Release body with commit hashes converted to links
+                jq -r --argjson notes "$RELEASE_JSON" -n '$notes | .body' | \
+                  sed -e "/^\* /{ s@(\([a-f0-9]\+\))\$@[${REPO}\@\1](https://github.com/${REPO}/commit/\1)@; }"
+              }
+            )"
+          done
+
+          # Prepend new release notes to existing changelog
+          if [ -f "$CHANGELOG_FILE" ]; then
+            PREVIOUS_CONTENT="$(cat "$CHANGELOG_FILE")"
+            {
+              echo "$RELEASE_NOTES"
+              echo
+              echo "$PREVIOUS_CONTENT"
+            } > "$CHANGELOG_FILE"
+          else
+            echo "$RELEASE_NOTES" > "$CHANGELOG_FILE"
+          fi
+
+      - name: Commit and push
+        if: steps.release.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          git config user.email "ci@quantum.security"
+          git config user.name "Quantum CI Bot"
+
+          # Check if there are actual changes to commit
+          git add "$DESTINATION"
+          if ! git diff --cached --quiet; then
+            git commit -m "Import content updates from ${SOURCE_REPOSITORY}@${RELEASE_VERSION} (patch)"
+
+            # Rebase in case of concurrent changes, then push
+            git fetch origin "$DEFAULT_BRANCH"
+            git rebase "origin/$DEFAULT_BRANCH"
+            git push origin "$DEFAULT_BRANCH"
+          else
+            echo "No changes to commit."
+          fi

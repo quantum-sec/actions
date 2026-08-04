@@ -1,0 +1,57 @@
+name: Strict YAML Validation
+
+# Reusable full-state YAML scan: strict-parse (duplicate keys rejected) every
+# YAML file under the given path. Used as a release exit-door — terraform's
+# yamldecode resolves duplicate keys silently last-wins at deploy time, so
+# malformed content must never ship. Secret-free.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Directory whose YAML files are validated (recursive).
+        required: true
+        type: string
+      fail_message:
+        description: Extra context printed when validation fails.
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  validate-yaml:
+    name: Strict YAML validation
+    runs-on: ubuntu-latest
+    env:
+      SCAN_PATH: ${{ inputs.path }}
+      FAIL_MESSAGE: ${{ inputs.fail_message }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate
+        run: |
+          pip install --quiet ruamel.yaml
+          python3 - <<'PYEOF'
+          from ruamel.yaml import YAML
+          import glob, os, sys
+          yaml = YAML(typ="safe")
+          base = os.environ["SCAN_PATH"].rstrip("/")
+          files = glob.glob(f"{base}/**/*.yaml", recursive=True) + glob.glob(f"{base}/**/*.yml", recursive=True)
+          failed = []
+          for path in files:
+              try:
+                  with open(path) as f:
+                      list(yaml.load_all(f))
+              except Exception as e:
+                  failed.append((path, str(e).splitlines()[0]))
+          for path, err in failed:
+              print(f"::error file={path}::{err}")
+          if failed:
+              print(f"{len(failed)} YAML file(s) failed strict validation.")
+              msg = os.environ.get("FAIL_MESSAGE")
+              if msg:
+                  print(msg)
+              sys.exit(1)
+          print(f"All {len(files)} YAML files parse cleanly.")
+          PYEOF
