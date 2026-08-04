@@ -1,0 +1,47 @@
+name: Repository Dispatch
+
+# Reusable release-notification: send a repository_dispatch event carrying a
+# version to a downstream repository. This is the trigger mechanism of the
+# content chain (library release → infrastructure-modules import), defined
+# once instead of copied into every library repo.
+
+on:
+  workflow_call:
+    inputs:
+      target_repository:
+        description: Repository to dispatch to (org/name).
+        required: true
+        type: string
+      event_type:
+        description: The repository_dispatch event type the target listens for.
+        required: true
+        type: string
+      version:
+        description: Release version carried in the client payload.
+        required: true
+        type: string
+    secrets:
+      GIT_TOKEN_BASIC:
+        required: true
+
+jobs:
+  dispatch:
+    name: Notify ${{ inputs.target_repository }}
+    runs-on: ubuntu-latest
+    env:
+      TARGET_REPOSITORY: ${{ inputs.target_repository }}
+      EVENT_TYPE: ${{ inputs.event_type }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Send repository dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GIT_TOKEN_BASIC }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$VERSION' is not strict semver — refusing to dispatch."
+            exit 1
+          fi
+          gh api "repos/${TARGET_REPOSITORY}/dispatches" \
+            -f event_type="$EVENT_TYPE" \
+            -f "client_payload[version]=$VERSION"
+          echo "Dispatched ${EVENT_TYPE}@${VERSION} to ${TARGET_REPOSITORY}"

@@ -21,6 +21,7 @@ Terraform-module workflows here are the candidate contribution to
 | `import-release-content.yaml` | Import a library release asset: download, strict-validate everything it adds/changes (bad content fails *before* the commit), version pointer, changelog, commit + push. Caller owns the dispatch triggers and concurrency group. |
 | `copy-source-to-repo.yaml` | Sync the paths in a path-list file into a mirror repository: rsync, GPG-signed bot commit, version tag, push. |
 | `strict-yaml-validation.yaml` | Full-state strict YAML scan of a directory (duplicate keys rejected) — the release exit-door check. No secrets. |
+| `repository-dispatch.yaml` | Send a version-carrying `repository_dispatch` to a downstream repo — the content chain's library-release → import trigger, defined once. |
 
 Deliberately **not** centralized: single-consumer automation (e.g.
 infrastructure-live-customer's template-update job) stays in its repo —
