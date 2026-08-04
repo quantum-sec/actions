@@ -15,7 +15,10 @@ on:
         description: Node.js version used to run semantic-release.
         required: false
         type: string
-        default: 'lts/*'
+        # Pinned to a specific supported LTS line (what lts/* resolves to
+        # today, proven by package-pki's 1.1.0 release) rather than floating —
+        # a new LTS line must be adopted deliberately, not by drift.
+        default: '24'
     outputs:
       semver:
         description: The version released from this commit; empty when no release was created.
