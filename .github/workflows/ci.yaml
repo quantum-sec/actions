@@ -1,0 +1,43 @@
+name: CI
+
+# Self-CI for the reusable-workflow repo: every consumer executes this
+# code with its secrets, so changes here must pass machine validation
+# before review. Make "Lint / actionlint" a required check in the ruleset.
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install actionlint
+        run: |
+          curl -fsSL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
+          tar xzf actionlint.tar.gz actionlint
+          rm actionlint.tar.gz
+
+      - name: Run actionlint
+        # Validates workflow schema, expressions, contexts, inputs/secrets
+        # references, and shellchecks every run: block.
+        run: ./actionlint -color
+
+      - name: Hygiene checks
+        run: |
+          pip install --quiet pre-commit
+          pre-commit run --all-files
