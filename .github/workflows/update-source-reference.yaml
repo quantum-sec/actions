@@ -1,0 +1,170 @@
+name: Update Source Reference
+
+# Reusable port of pipeline-library's update-source-reference.yml: after a
+# package release, rewrite the package's `?ref=` pins in the target repo
+# (default: infrastructure-modules). Minor/patch bumps push directly to the
+# default branch as GPG-signed bot commits; major bumps go via a feature
+# branch + PR for human review.
+#
+# Hardening carried from the TRU-327/342 security review: strict-semver guard
+# on the tag-derived version, no shell tracing (consumers are public repos
+# with world-readable logs), least-privilege GITHUB_TOKEN (all pushes
+# authenticate via GIT_TOKEN_BASIC / SSH).
+
+on:
+  workflow_call:
+    inputs:
+      package_name:
+        description: The package whose `?ref=` pins are rewritten (matched as <package_name>.git in .tf/.hcl sources).
+        required: true
+        type: string
+      target_repository:
+        description: Repository whose sources are updated.
+        required: false
+        type: string
+        default: infrastructure-modules
+      source_org:
+        description: GitHub organization hosting the target repository.
+        required: false
+        type: string
+        default: quantum-sec
+      default_branch:
+        description: Branch that minor/patch updates are pushed to directly.
+        required: false
+        type: string
+        default: master
+      gpg_key_id:
+        description: Fingerprint of the CI bot signing key.
+        required: false
+        type: string
+        default: 5DEFE5F42550F28A17F9B83AC7E6D88B99BC6D9D
+      gpg_key_subject:
+        description: Committer email matching the signing key.
+        required: false
+        type: string
+        default: ci@quantum.security
+    secrets:
+      GIT_TOKEN_BASIC:
+        required: true
+      IMPORT_GPG_KEY:
+        required: true
+      IMPORT_GPG_KEY_PASSPHRASE:
+        required: true
+      QUANTUM_CI_BOT_GITHUB_SSH_KEY:
+        required: true
+
+jobs:
+  update-source-reference:
+    name: Update ${{ inputs.target_repository }} references
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_NAME: ${{ inputs.package_name }}
+      TARGET_REPOSITORY: ${{ inputs.target_repository }}
+      SOURCE_ORG: ${{ inputs.source_org }}
+      DEFAULT_BRANCH: ${{ inputs.default_branch }}
+      GPG_KEY_SUBJECT: ${{ inputs.gpg_key_subject }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GIT_TOKEN_BASIC }}
+          fetch-depth: 0
+
+      - name: Determine version change
+        # Port of pipeline-library's verify-version-changed.yml
+        run: |
+          git fetch --tags --force --quiet
+          LATEST_VERSION="$(git describe --tags --abbrev=0)"
+          # Tag names are attacker-influenceable and are later interpolated
+          # into sed expressions that write into the target repository —
+          # require strict semver before using the value anywhere
+          if ! [[ "$LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Latest tag '$LATEST_VERSION' is not strict semver — refusing to proceed."
+            exit 1
+          fi
+          PREVIOUS_VERSION="$(git describe --abbrev=0 --tags "$(git rev-list --tags --skip=1 --max-count=1)")"
+          echo "Latest tag version: $LATEST_VERSION (previous: $PREVIOUS_VERSION)"
+          current=(${LATEST_VERSION//./ })
+          previous=(${PREVIOUS_VERSION//./ })
+          if [ "${current[0]}" -gt "${previous[0]}" ]; then
+            VERSION_CHANGED=major
+          elif [ "${current[1]}" -gt "${previous[1]}" ]; then
+            VERSION_CHANGED=minor
+          elif [ "${current[2]}" -gt "${previous[2]}" ]; then
+            VERSION_CHANGED=patch
+          else
+            VERSION_CHANGED=same
+          fi
+          echo "Version change: $VERSION_CHANGED"
+          echo "LATEST_VERSION=$LATEST_VERSION" >> "$GITHUB_ENV"
+          echo "VERSION_CHANGED=$VERSION_CHANGED" >> "$GITHUB_ENV"
+
+      - name: Import GPG key
+        env:
+          GPG_KEY_BASE64: ${{ secrets.IMPORT_GPG_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.IMPORT_GPG_KEY_PASSPHRASE }}
+          GPG_KEY_ID: ${{ inputs.gpg_key_id }}
+        run: |
+          echo "$GPG_KEY_BASE64" | base64 -d | gpg --batch --yes --no-tty --always-trust --import
+          echo "ENCRYPTION_TEST" | gpg --always-trust --encrypt --recipient "$GPG_KEY_SUBJECT" > temp.encrypted
+          gpg --batch --yes --no-tty --decrypt --passphrase "$GPG_PASSPHRASE" --pinentry-mode loopback --always-trust temp.encrypted
+          rm -f temp.encrypted
+          git config --global user.signingkey "$GPG_KEY_ID"
+          git config --global commit.gpgsign true
+
+      - name: Setup SSH key
+        env:
+          SSH_KEY: ${{ secrets.QUANTUM_CI_BOT_GITHUB_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Update source references
+        env:
+          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN_BASIC }}
+          GH_TOKEN: ${{ secrets.GIT_TOKEN_BASIC }}
+        run: |
+          # No shell tracing: consumers are public repos, so Actions logs are
+          # world-readable — keep output to the deliberate echoes only.
+          set -e
+          git config --global user.email "$GPG_KEY_SUBJECT"
+          git config --global user.name "Quantum CI Bot"
+          git clone "git@github.com:${SOURCE_ORG}/${TARGET_REPOSITORY}.git"
+          pushd "./${TARGET_REPOSITORY}"
+          current=(${LATEST_VERSION//./ })
+          current_major="${current[0]}"
+          echo "Checking if major version in the tf changed"
+          if ! grep -q --include=*.tf --include=*.hcl -rio "${PACKAGE_NAME}\.git.*ref=[^${current_major}]\." .; then
+            echo "No major version change detected in any of the tf or hcl files"
+            major_version_changed=false
+          else
+            echo "Major version has been detected in one or more of the tf or hcl files"
+            major_version_changed=true
+            branch="feature/${PACKAGE_NAME}"
+            git checkout $branch && git pull || git checkout -b $branch
+          fi
+          echo "Searching: ${PACKAGE_NAME}"
+          find ./ -name "*.tf" -type f -exec sed -i "/${PACKAGE_NAME}\.git/ s/\?ref=.*/\?ref=${LATEST_VERSION}\"/" {} \;
+          find ./ -name "*.hcl" -type f -exec sed -i "/${PACKAGE_NAME}\.git/ s/\?ref=.*/\?ref=${LATEST_VERSION}\"/" {} \;
+          git diff
+          git add .
+          git commit -m "Update ${PACKAGE_NAME} references to ${LATEST_VERSION} (${VERSION_CHANGED})"
+          if $major_version_changed
+          then
+            echo "Major version has been changed, creating a pr request"
+            git push origin $branch
+            pr_number=$(gh pr list --json title --json number --json state --jq '.[] | select((.title | startswith("Update ${PACKAGE_NAME} references")) and (.state == "OPEN")) | .number')
+            pr_title="Update ${PACKAGE_NAME} references to ${LATEST_VERSION}"
+            pr_body="- [x] Update references to [${PACKAGE_NAME}](https://github.com/${SOURCE_ORG}/${PACKAGE_NAME}) to refer to the latest release ([${LATEST_VERSION}](https://github.com/${SOURCE_ORG}/${PACKAGE_NAME}/releases/tag/${LATEST_VERSION}))"
+            if [ -z "$pr_number" ]; then
+              gh pr create --title "$pr_title" --body "$pr_body"
+            else
+              gh pr edit "$pr_number" --title "$pr_title" --body "$pr_body"
+            fi
+          else
+            echo "Major version was not changed, merging to ${DEFAULT_BRANCH}"
+            git push origin ${DEFAULT_BRANCH}
+          fi
+          popd
