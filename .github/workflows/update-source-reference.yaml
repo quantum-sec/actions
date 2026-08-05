@@ -84,16 +84,16 @@ jobs:
           fi
           PREVIOUS_VERSION="$(git describe --abbrev=0 --tags "$(git rev-list --tags --skip=1 --max-count=1)")"
           echo "Latest tag version: $LATEST_VERSION (previous: $PREVIOUS_VERSION)"
-          current=(${LATEST_VERSION//./ })
-          previous=(${PREVIOUS_VERSION//./ })
+          IFS='.' read -r -a current <<< "$LATEST_VERSION"
+          IFS='.' read -r -a previous <<< "$PREVIOUS_VERSION"
           if [ "${current[0]}" -gt "${previous[0]}" ]; then
-            VERSION_CHANGED=major
+            VERSION_CHANGED="major"
           elif [ "${current[1]}" -gt "${previous[1]}" ]; then
-            VERSION_CHANGED=minor
+            VERSION_CHANGED="minor"
           elif [ "${current[2]}" -gt "${previous[2]}" ]; then
-            VERSION_CHANGED=patch
+            VERSION_CHANGED="patch"
           else
-            VERSION_CHANGED=same
+            VERSION_CHANGED="same"
           fi
           echo "Version change: $VERSION_CHANGED"
           echo "LATEST_VERSION=$LATEST_VERSION" >> "$GITHUB_ENV"
@@ -133,17 +133,21 @@ jobs:
           git config --global user.name "Quantum CI Bot"
           git clone "git@github.com:${SOURCE_ORG}/${TARGET_REPOSITORY}.git"
           pushd "./${TARGET_REPOSITORY}"
-          current=(${LATEST_VERSION//./ })
+          IFS='.' read -r -a current <<< "$LATEST_VERSION"
           current_major="${current[0]}"
           echo "Checking if major version in the tf changed"
           if ! grep -q --include=*.tf --include=*.hcl -rio "${PACKAGE_NAME}\.git.*ref=[^${current_major}]\." .; then
             echo "No major version change detected in any of the tf or hcl files"
-            major_version_changed=false
+            major_version_changed="false"
           else
             echo "Major version has been detected in one or more of the tf or hcl files"
-            major_version_changed=true
+            major_version_changed="true"
             branch="feature/${PACKAGE_NAME}"
-            git checkout $branch && git pull || git checkout -b $branch
+            if git checkout "$branch"; then
+              git pull
+            else
+              git checkout -b "$branch"
+            fi
           fi
           echo "Searching: ${PACKAGE_NAME}"
           find ./ -name "*.tf" -type f -exec sed -i "/${PACKAGE_NAME}\.git/ s/\?ref=.*/\?ref=${LATEST_VERSION}\"/" {} \;
@@ -151,11 +155,11 @@ jobs:
           git diff
           git add .
           git commit -m "Update ${PACKAGE_NAME} references to ${LATEST_VERSION} (${VERSION_CHANGED})"
-          if $major_version_changed
+          if [ "$major_version_changed" = "true" ]
           then
             echo "Major version has been changed, creating a pr request"
-            git push origin $branch
-            pr_number=$(gh pr list --json title --json number --json state --jq '.[] | select((.title | startswith("Update ${PACKAGE_NAME} references")) and (.state == "OPEN")) | .number')
+            git push origin "$branch"
+            pr_number=$(gh pr list --json title,number,state --jq ".[] | select((.title | startswith(\"Update ${PACKAGE_NAME} references\")) and (.state == \"OPEN\")) | .number")
             pr_title="Update ${PACKAGE_NAME} references to ${LATEST_VERSION}"
             pr_body="- [x] Update references to [${PACKAGE_NAME}](https://github.com/${SOURCE_ORG}/${PACKAGE_NAME}) to refer to the latest release ([${LATEST_VERSION}](https://github.com/${SOURCE_ORG}/${PACKAGE_NAME}/releases/tag/${LATEST_VERSION}))"
             if [ -z "$pr_number" ]; then
@@ -165,6 +169,6 @@ jobs:
             fi
           else
             echo "Major version was not changed, merging to ${DEFAULT_BRANCH}"
-            git push origin ${DEFAULT_BRANCH}
+            git push origin "$DEFAULT_BRANCH"
           fi
           popd
