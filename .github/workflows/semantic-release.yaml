@@ -19,6 +19,20 @@ on:
         # today, proven by package-pki's 1.1.0 release) rather than floating —
         # a new LTS line must be adopted deliberately, not by drift.
         default: '24'
+      release_artifact:
+        description: >-
+          Name of a workflow artifact (uploaded by an earlier job in the same
+          run) to download before running semantic-release, so an assets-type
+          release config can attach its contents to the GitHub release. Empty
+          skips the download.
+        required: false
+        type: string
+        default: ''
+      release_artifact_path:
+        description: Directory the artifact is downloaded into.
+        required: false
+        type: string
+        default: dist/assets/
     outputs:
       semver:
         description: The version released from this commit; empty when no release was created.
@@ -46,6 +60,13 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Download release artifacts
+        if: inputs.release_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.release_artifact }}
+          path: ${{ inputs.release_artifact_path }}
 
       - name: Run semantic-release
         env:
