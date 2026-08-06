@@ -22,9 +22,11 @@ centralizing a one-off adds indirection without reuse.
 
 Pin by tag, never a branch. Two conventions depending on the workflow:
 
-- **Validation workflows** (no secrets): use the floating major tag, e.g.
+- **Validation workflows**: use the floating major tag, e.g.
   `terraform-module-validation.yaml@v1` — patch and minor improvements
-  arrive without consumer changes.
+  arrive without consumer changes. These workflows receive no secrets
+  and run with a read-only token, which is what makes a floating pin
+  (and fork-triggered runs) acceptable for them.
 - **Workflows that receive secrets**: pin an exact version, e.g.
   `semantic-release.yaml@v1.4.0` — new versions reach a consumer only
   through a reviewed pull request.
@@ -46,6 +48,8 @@ jobs:
 
 ## Versioning
 
-Semantic tags (`vX.Y.Z`) plus a floating major tag (`v1`). Version tags
-are protected against modification. Breaking interface changes bump the
-major version.
+Semantic tags (`vX.Y.Z`) plus a floating major tag (`v1`). Exact version
+tags are immutable once published; `v1` is deliberately re-pointed to
+each release — both behaviors enforced by a tag ruleset, so only
+repository admins can move any of them. Breaking interface changes bump
+the major version.
