@@ -54,6 +54,17 @@ jobs:
           chmod +x "$HOME/.local/bin/tfsec"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: Install terraform-docs
+        # Same version the AzDO CI image baked in; repos using the
+        # terraform-docs-system pre-commit hook need the system binary.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o /tmp/terraform-docs.tar.gz \
+            https://github.com/terraform-docs/terraform-docs/releases/download/v0.16.0/terraform-docs-v0.16.0-linux-amd64.tar.gz
+          echo "328c16cd6552b3b5c4686b8d945a2e2e18d2b8145b6b66129cd5491840010182  /tmp/terraform-docs.tar.gz" | sha256sum -c -
+          tar xzf /tmp/terraform-docs.tar.gz -C "$HOME/.local/bin" terraform-docs
+          chmod +x "$HOME/.local/bin/terraform-docs"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
